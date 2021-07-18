@@ -1,7 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices.ComTypes;
 using System.Threading.Tasks;
 using Discord;
 using Discord.WebSocket;
@@ -15,7 +18,9 @@ namespace AutomatedAsterakDiscordBot
         private readonly string[] ppSizeRoleNames = {"micro pp", "Smol pp Gang", "Average pp size", "Huge pp Gang", "MONSTER PP GANG", "MEGA PP"};
 
         private IGuildUser lastPpUser;
-        private readonly ulong ppChannelId = 865864730040205342;
+        private readonly ulong ppChannelId = 822339454794334238; // production
+        //private readonly ulong ppChannelId = 865864730040205342; // test
+        private List<ulong> PpRequestUserIds { get; set; }
 
         static void Main(string[] args) => new Program().MainAsync().GetAwaiter().GetResult();
 
@@ -31,6 +36,7 @@ namespace AutomatedAsterakDiscordBot
             await client.StartAsync();
 
             client.MessageReceived += MessageReceived;
+            PpRequestUserIds = new List<ulong>();
 
             // Block this task until the program is closed.
             await Task.Delay(-1);
@@ -44,31 +50,39 @@ namespace AutomatedAsterakDiscordBot
 
         private Task Log(LogMessage msg)
         {
-            Console.WriteLine(msg.ToString());
+            File.AppendAllText(Path.Combine(Environment.CurrentDirectory, "log.txt"), msg.ToString() + Environment.NewLine);
             return Task.CompletedTask;
         }
 
-        private async Task MessageReceived(SocketMessage msg)
+        private Task MessageReceived(SocketMessage msg)
         {
-
             if (msg.Author.Id.Equals(client.CurrentUser.Id))
             {
-                return;
+                return Task.CompletedTask;
             }
 
             switch (GetMessagePurpose(msg))
             {
                 case MessagePurpose.DankPpSizeResponse:
-                    DankPpSizeResponse(msg);
+                    _ = Log("Received pp size response message type");
+                    _ = DankPpSizeResponse(msg);
                     break;
                 case MessagePurpose.DankPpSizeRequest:
-                    await DankPpSizeRequest(msg);
+                    _ = Log("Received pp size request message type");
+                    _ = DankPpSizeRequest(msg);
                     break;
-                default:
-                    return;
+                case MessagePurpose.DankPpReminder:
+                    _ = Log("Received pp reminder message type");
+                    _ = ClearPpRequests();
+                    break;
             }
+            return Task.CompletedTask;
+        }
 
-            //var channel = client.GetChannel(msg.Channel.Id) as ITextChannel;
+        private Task ClearPpRequests()
+        {
+            PpRequestUserIds = new List<ulong>();
+            return Task.CompletedTask;
         }
 
         private Task DankPpSizeRequest(SocketMessage msg)
@@ -85,35 +99,103 @@ namespace AutomatedAsterakDiscordBot
         {
             if (!msg.Channel.Id.Equals(ppChannelId))
             {
+                _ = Log($"Incorrect channel. Expected {ppChannelId}, got {msg.Channel.Id}");
                 return;
             }
 
             var user = lastPpUser;
             lastPpUser = null;
 
+            user = msg.Channel.GetUserAsync(user.Id).Result as IGuildUser;
+
             if (user == null)
             {
-                Log("Dank pp size response - No information about user");
+                _ = Log("Dank pp size response - No information about user");
                 return;
             }
+
+            if (PpRequestUserIds.Contains(user.Id))
+            {
+                await AssignMicroPp(user, msg);
+                return;
+            }
+
+            PpRequestUserIds.Add(user.Id);
 
             var pp = msg.Embeds.First().Description.Split('\n', StringSplitOptions.RemoveEmptyEntries).Last();
             var ppSize = pp.Substring(1, pp.Length - 2).Length;
             var ppSizeString = DeterminePpSize(ppSize);
 
-            var roles = user.Guild.Roles.Where(guildRole => ppSizeRoleNames.Contains(guildRole.Name));
+            _ = Log($"Adding {ppSizeString} role to {user.Nickname} because of size {ppSizeString}");
 
-            roles = roles.Where(role => ppSizeRoleNames.Any(name => name.Equals(role.Name)));
-
-            await user.RemoveRolesAsync(roles);
+            await RemovePpRoles(user);
 
             await user.AddRoleAsync(user.Guild.Roles.First(guildRole => guildRole.Name.Equals(ppSizeString)));
+
+            foreach (var unicode in GetReactions(ppSize))
+            {
+                await msg.AddReactionAsync(new Emoji(unicode));
+            }
+
+        }
+
+        private IEnumerable<string> GetReactions(int number)
+        {
+            if (number > 9)
+            {
+                yield return "\U0001F1EE";
+            }
             
-            await msg.AddReactionAsync(new Emoji("\U0001F346"));
+            switch (number%10)
+            {
+                case 0:
+                    yield return "\U00000030\U0000FE0F\U000020E3";
+                    break;
+                case 1:
+                    yield return "\U00000031\U0000FE0F\U000020E3";
+                    break;
+                case 2:
+                    yield return "\U00000032\U0000FE0F\U000020E3";
+                    break;
+                case 3:
+                    yield return "\U00000033\U0000FE0F\U000020E3";
+                    break;
+                case 4:
+                    yield return "\U00000034\U0000FE0F\U000020E3";
+                    break;
+                case 5:
+                    yield return "\U00000035\U0000FE0F\U000020E3";
+                    break;
+                case 6:
+                    yield return "\U00000036\U0000FE0F\U000020E3";
+                    break;
+                case 7:
+                    yield return "\U00000037\U0000FE0F\U000020E3";
+                    break;
+                case 8:
+                    yield return "\U00000038\U0000FE0F\U000020E3";
+                    break;
+                case 9:
+                    yield return "\U00000039\U0000FE0F\U000020E3";
+                    break;
+            }
+        }
 
-            Console.WriteLine($"user {user.Username}, size {ppSizeString}");
+        private async Task RemovePpRoles(IGuildUser user)
+        {
+            var roles = user.Guild.Roles.Where(guildRole => ppSizeRoleNames.Contains(guildRole.Name));
+            
+            roles = roles.Where(role => user.RoleIds.Any(userRole => userRole.Equals(role.Id)));
+            
+            await user.RemoveRolesAsync(roles);
+        }
 
-            //var channel = client.GetChannel(msg.Channel.Id) as ITextChannel;
+        private async Task AssignMicroPp(IGuildUser user, SocketMessage msg)
+        {
+            _ = Log($"Adding  micro pp role to {user.Nickname}");
+            await RemovePpRoles(user);
+            await user.AddRoleAsync(user.Guild.Roles.First(guildRole => guildRole.Name.Equals(ppSizeRoleNames[0])));
+            await msg.AddReactionAsync(new Emoji("\U0000274C"));
         }
 
         private string DeterminePpSize(int size)
@@ -156,6 +238,11 @@ namespace AutomatedAsterakDiscordBot
                 return MessagePurpose.DankPpSizeResponse;
             }
 
+            if(msg.Channel is SocketGuildChannel channel && msg.MentionedRoles.Contains(channel.Guild.Roles.FirstOrDefault(role => role.Name.Equals("pp reminder"))))
+            {
+                return MessagePurpose.DankPpReminder;
+            }
+
             return MessagePurpose.Other;
         }
     }
@@ -164,6 +251,7 @@ namespace AutomatedAsterakDiscordBot
     {
         DankPpSizeRequest,
         DankPpSizeResponse,
-        Other
+        Other,
+        DankPpReminder
     }
 }
