@@ -45,7 +45,7 @@ namespace AutomatedAsterakDiscordBot
 
         private Task Log(string msg)
         {
-            return Log(new LogMessage(LogSeverity.Info, string.Empty, $"{DateTime.Now} - {msg}"));
+            return Log(new LogMessage(LogSeverity.Info, string.Empty, msg));
         }
 
         private Task Log(LogMessage msg)
@@ -126,7 +126,7 @@ namespace AutomatedAsterakDiscordBot
             var ppSize = pp.Substring(1, pp.Length - 2).Length;
             var ppSizeString = DeterminePpSize(ppSize);
 
-            _ = Log($"Adding {ppSizeString} role to {user.Nickname} because of size {ppSizeString}");
+            _ = Log($"Adding {ppSizeString} role to {user.Nickname} because of size {ppSize}");
 
             await RemovePpRoles(user);
 
@@ -233,7 +233,7 @@ namespace AutomatedAsterakDiscordBot
 
         private MessagePurpose GetBotMessagePurpose(SocketMessage msg)
         {
-            if (msg.Embeds.Any() && msg.Embeds.First().Title.Equals("peepee size machine"))
+            if (msg.Embeds.Any() && "peepee size machine".Equals(msg.Embeds.First().Title))
             {
                 return MessagePurpose.DankPpSizeResponse;
             }
