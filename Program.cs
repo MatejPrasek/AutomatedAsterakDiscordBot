@@ -1,13 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Data;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices.ComTypes;
 using System.Threading.Tasks;
 using Discord;
 using Discord.WebSocket;
+using Newtonsoft.Json;
 
 namespace AutomatedAsterakDiscordBot
 {
@@ -18,17 +16,17 @@ namespace AutomatedAsterakDiscordBot
         private readonly string[] ppSizeRoleNames = {"micro pp", "Smol pp Gang", "Average pp size", "Huge pp Gang", "MONSTER PP GANG", "MEGA PP"};
 
         private IGuildUser lastPpUser;
-        private readonly ulong ppChannelId = 822339454794334238; // production
-        //private readonly ulong ppChannelId = 865864730040205342; // test
-        private List<ulong> PpRequestUserIds { get; set; }
+        private readonly ulong ppChannelId = ulong.Parse(Environment.GetEnvironmentVariable("AutomatedAsterakPpChannelId") ?? throw new ArgumentException("AutomatedAsterakDiscordToken environment variable is not set"));
+        private Dictionary<ulong, DateTime> PpUserList { get; set; }
+        private TimeSpan PpSizeResetTimeUtc { get; set; }
 
-        static void Main(string[] args) => new Program().MainAsync().GetAwaiter().GetResult();
+        static void Main() => new Program().MainAsync().GetAwaiter().GetResult();
 
         private async Task MainAsync()
         {
             client = new DiscordSocketClient();
 
-            client.Log += Log;
+            client.Log += ClientLog;
             
             var token = Environment.GetEnvironmentVariable("AutomatedAsterakDiscordToken");
 
@@ -36,21 +34,34 @@ namespace AutomatedAsterakDiscordBot
             await client.StartAsync();
 
             client.MessageReceived += MessageReceived;
-            PpRequestUserIds = new List<ulong>();
+            PpUserList = await GetPpUserList();
+            PpSizeResetTimeUtc = new TimeSpan(16, 0, 0);
 
             // Block this task until the program is closed.
             await Task.Delay(-1);
         }
 
+        private async Task<Dictionary<ulong, DateTime>> GetPpUserList()
+        {
+            if (!File.Exists("PpUserList.json"))
+            {
+                return new Dictionary<ulong, DateTime>();
+            }
+
+            var ppUserList = await File.ReadAllTextAsync("PpUserList.json");
+            return JsonConvert.DeserializeObject<Dictionary<ulong, DateTime>>(ppUserList);
+        }
+
 
         private Task Log(string msg)
         {
-            return Log(new LogMessage(LogSeverity.Info, string.Empty, msg));
+            File.AppendAllText(Path.Combine(Environment.CurrentDirectory, "log.txt"), $"{DateTime.Now} - {msg}{Environment.NewLine}");
+            return Task.CompletedTask;
         }
 
-        private Task Log(LogMessage msg)
+        private Task ClientLog(LogMessage msg)
         {
-            File.AppendAllText(Path.Combine(Environment.CurrentDirectory, "log.txt"), msg.ToString() + Environment.NewLine);
+            File.AppendAllText(Path.Combine(Environment.CurrentDirectory, "ClientLog.txt"), msg.ToString() + Environment.NewLine);
             return Task.CompletedTask;
         }
 
@@ -73,16 +84,32 @@ namespace AutomatedAsterakDiscordBot
                     break;
                 case MessagePurpose.DankPpReminder:
                     _ = Log("Received pp reminder message type");
-                    _ = ClearPpRequests();
+                    _ = DankPpSizeReminder(msg);
                     break;
             }
             return Task.CompletedTask;
         }
 
-        private Task ClearPpRequests()
+        private async Task DankPpSizeReminder(SocketMessage msg)
         {
-            PpRequestUserIds = new List<ulong>();
-            return Task.CompletedTask;
+            PpSizeResetTimeUtc = msg.CreatedAt.UtcDateTime.TimeOfDay;
+
+            foreach (var (key, lastMeasured) in PpUserList)
+            {
+                if (DateTime.UtcNow - lastMeasured <= TimeSpan.FromDays(2)) continue;
+
+                var user = msg.Channel.GetUserAsync(key).Result as IGuildUser;
+                if(user == null) continue;
+
+                await ((ITextChannel) msg.Channel).SendMessageAsync(
+                    $"{user.Mention} we are not sure about your pp size. Please allow us to measure it again. (you lost your pp size role due to inactivity");
+
+                await RemovePpRoles(user);
+
+                PpUserList.Remove(key);
+                _ = SavePpUserListAsync();
+            }
+            
         }
 
         private Task DankPpSizeRequest(SocketMessage msg)
@@ -106,21 +133,25 @@ namespace AutomatedAsterakDiscordBot
             var user = lastPpUser;
             lastPpUser = null;
 
-            user = msg.Channel.GetUserAsync(user.Id).Result as IGuildUser;
-
             if (user == null)
             {
                 _ = Log("Dank pp size response - No information about user");
                 return;
             }
 
-            if (PpRequestUserIds.Contains(user.Id))
+            if (!PpUserList.TryGetValue(user.Id, out var lastMeasure))
+            {
+                lastMeasure = DateTime.MinValue;
+            }
+
+            if (!IsPpRequestInLimit(lastMeasure, msg.CreatedAt.UtcDateTime))
             {
                 await AssignMicroPp(user, msg);
                 return;
             }
 
-            PpRequestUserIds.Add(user.Id);
+            PpUserList[user.Id] = msg.CreatedAt.UtcDateTime;
+            _ = SavePpUserListAsync();
 
             var pp = msg.Embeds.First().Description.Split('\n', StringSplitOptions.RemoveEmptyEntries).Last();
             var ppSize = pp.Substring(1, pp.Length - 2).Length;
@@ -137,6 +168,24 @@ namespace AutomatedAsterakDiscordBot
                 await msg.AddReactionAsync(new Emoji(unicode));
             }
 
+        }
+
+        private async Task SavePpUserListAsync()
+        {
+            var serialized = JsonConvert.SerializeObject(PpUserList);
+            await File.WriteAllTextAsync("PpUserList.json", serialized);
+        }
+
+        private bool IsPpRequestInLimit(DateTime lastMeasure, DateTime requestTime)
+        {
+            var resetDateTime = DateTime.Today + PpSizeResetTimeUtc;
+
+            if (requestTime.TimeOfDay < PpSizeResetTimeUtc)
+            {
+                resetDateTime -= TimeSpan.FromDays(1);
+            }
+
+            return requestTime - resetDateTime < requestTime - lastMeasure;
         }
 
         private IEnumerable<string> GetReactions(int number)
